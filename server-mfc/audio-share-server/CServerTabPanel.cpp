@@ -32,6 +32,19 @@ bool CServerTabPanel::IsRunning()
     return m_bStarted;
 }
 
+void CServerTabPanel::Shutdown()
+{
+    // Called on application exit to release the server (recording thread,
+    // network thread and bound sockets) in order, instead of relying on abrupt
+    // process termination to free the port. stop_server() is idempotent, but we
+    // still guard on is_running() to avoid a misleading "server stopped" log
+    // when nothing was started. The persisted "Running" flag is intentionally
+    // left untouched so the "restart if running" startup option keeps working.
+    if (m_network_manager && m_network_manager->is_running()) {
+        m_network_manager->stop_server();
+    }
+}
+
 void CServerTabPanel::DoDataExchange(CDataExchange* pDX)
 {
     CDialogEx::DoDataExchange(pDX);

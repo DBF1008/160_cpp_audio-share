@@ -272,6 +272,13 @@ void CMainDialog::OnDestroy()
 {
     CDialogEx::OnDestroy();
 
+    // Tear down the server (recording + network threads, bound sockets) in order
+    // before the window and its panels are destroyed, so exiting the app cleanly
+    // releases the port instead of relying on process termination.
+    if (m_tabPanelServer != nullptr) {
+        m_tabPanelServer->Shutdown();
+    }
+
     // TODO: Add your message handler code here
     ShowNotificationIcon(false);
 }

@@ -23,6 +23,7 @@ public:
 public:
 	void SwitchServer();
 	bool IsRunning();
+	void Shutdown();
 
 protected:
 	virtual void DoDataExchange(CDataExchange* pDX);    // DDX/DDV support

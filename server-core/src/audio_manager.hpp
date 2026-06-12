@@ -17,11 +17,15 @@
 #ifndef BASIC_AUDIO_MANAGER_HPP
 #define BASIC_AUDIO_MANAGER_HPP
 
-#ifdef linux
+// AUDIO_SHARE_FAKE_AUDIO selects a test-only backend so the platform-independent
+// lifecycle code can be built and exercised on any platform. Production builds
+// (Windows/Linux) never define it, so the branches below behave exactly as
+// before for them.
+#if defined(AUDIO_SHARE_FAKE_AUDIO)
+#include "fake/audio_manager_impl.hpp"
+#elif defined(linux)
 #include "linux/audio_manager_impl.hpp"
-#endif
-
-#ifdef _WINDOWS
+#elif defined(_WINDOWS)
 #include "win32/audio_manager_impl.hpp"
 #endif
 

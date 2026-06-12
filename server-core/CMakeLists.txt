@@ -60,3 +60,24 @@ if(${PLATFORM_NAME} STREQUAL "linux")
 endif()
 
 install(TARGETS server-cmd)
+
+# Lifecycle regression tests. These compile the real network_manager and
+# audio_manager against a deterministic fake audio backend (no real hardware),
+# so they run on any platform. Enable with -DAUDIO_SHARE_BUILD_TESTS=ON and run
+# with ctest. (A no-cmake fallback for hosts without vcpkg lives in
+# tests/run_tests.sh.)
+option(AUDIO_SHARE_BUILD_TESTS "Build server-core lifecycle regression tests" OFF)
+if(AUDIO_SHARE_BUILD_TESTS)
+	enable_testing()
+	add_executable(server-core-tests
+		"src/network_manager.cpp"
+		"src/audio_manager.cpp"
+		"tests/fake_audio_manager_impl.cpp"
+		"tests/lifecycle_tests.cpp"
+		${PROTO_SRCS}
+	)
+	target_compile_definitions(server-core-tests PRIVATE AUDIO_SHARE_FAKE_AUDIO)
+	target_include_directories(server-core-tests PRIVATE "tests")
+	target_link_libraries(server-core-tests PRIVATE asio::asio spdlog::spdlog protobuf::libprotobuf)
+	add_test(NAME lifecycle COMMAND server-core-tests)
+endif()

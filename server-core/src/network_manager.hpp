@@ -54,6 +54,7 @@ class network_manager : public std::enable_shared_from_this<network_manager>
 public:
 
     explicit network_manager(std::shared_ptr<audio_manager>& audio_manager);
+    ~network_manager();
 
     static std::vector<std::string> get_address_list();
     static std::string get_default_address();

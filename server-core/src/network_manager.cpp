@@ -21,6 +21,8 @@
 #include <list>
 #include <ranges>
 #include <coroutine>
+#include <stdexcept>
+#include <thread>
 
 #ifdef _WINDOWS
 #include <iphlpapi.h>
@@ -41,9 +43,37 @@
 namespace ip = asio::ip;
 using namespace std::chrono_literals;
 
+namespace {
+// Join the network thread, unless we are running on that very thread (which can
+// happen when the manager's last owner is the thread's own captured `self`):
+// joining self would deadlock, so detach instead. By the time that situation
+// can arise the io_context::run() call has already returned, so detaching is
+// safe.
+void join_or_detach_self(std::thread& t)
+{
+    if (!t.joinable()) {
+        return;
+    }
+    if (t.get_id() == std::this_thread::get_id()) {
+        t.detach();
+    } else {
+        t.join();
+    }
+}
+} // namespace
+
 network_manager::network_manager(std::shared_ptr<audio_manager>& audio_manager)
     : _audio_manager(audio_manager)
 {
+}
+
+network_manager::~network_manager()
+{
+    // Safety net: if the owner drops us without an explicit stop_server()
+    // (e.g. the GUI window is destroyed while running), make sure the network
+    // and recording threads are joined instead of letting a still-joinable
+    // std::thread call std::terminate() from its destructor.
+    stop_server();
 }
 
 std::vector<std::string> network_manager::get_address_list()
@@ -147,55 +177,95 @@ std::string network_manager::select_default_address(const std::vector<std::strin
 
 void network_manager::start_server(const std::string& host, uint16_t port, const audio_manager::capture_config& capture_config)
 {
+    if (is_running()) {
+        throw std::runtime_error("server is already running");
+    }
+
+    // Validate the capture config before acquiring any resource so an invalid
+    // request fails fast without leaving anything half-started.
+    if (capture_config.encoding == audio_manager::encoding_t::encoding_invalid) {
+        throw std::invalid_argument("invalid capture encoding");
+    }
+
     _ioc = std::make_shared<asio::io_context>();
-    {
-        ip::tcp::endpoint endpoint { ip::make_address(host), port };
 
-        ip::tcp::acceptor acceptor(*_ioc, endpoint.protocol());
-        acceptor.set_option(ip::tcp::acceptor::reuse_address(true));
-        acceptor.bind(endpoint);
-        acceptor.listen();
+    // Track which resources were brought up so a failure at any later step can
+    // be rolled back to a clean, not-running state (see the catch block).
+    bool recording_started = false;
+    try {
+        {
+            ip::tcp::endpoint endpoint { ip::make_address(host), port };
 
-        _audio_manager->start_loopback_recording(shared_from_this(), capture_config);
-        asio::co_spawn(*_ioc, accept_tcp_loop(std::move(acceptor)), asio::detached);
+            ip::tcp::acceptor acceptor(*_ioc, endpoint.protocol());
+            acceptor.set_option(ip::tcp::acceptor::reuse_address(true));
+            acceptor.bind(endpoint);
+            acceptor.listen();
 
-        // start tcp success
-        spdlog::info("tcp listen success on {}", endpoint);
+            _audio_manager->start_loopback_recording(shared_from_this(), capture_config);
+            recording_started = true;
+            asio::co_spawn(*_ioc, accept_tcp_loop(std::move(acceptor)), asio::detached);
+
+            // start tcp success
+            spdlog::info("tcp listen success on {}", endpoint);
+        }
+
+        {
+            ip::udp::endpoint endpoint { ip::make_address(host), port };
+            _udp_server = std::make_unique<udp_socket>(*_ioc, endpoint.protocol());
+            _udp_server->bind(endpoint);
+            asio::co_spawn(*_ioc, accept_udp_loop(), asio::detached);
+
+            // start udp success
+            spdlog::info("udp listen success on {}", endpoint);
+        }
+
+        _net_thread = std::thread([self = shared_from_this()] {
+            self->_ioc->run();
+        });
+    } catch (...) {
+        // Roll back in producer-before-consumer order. The recording thread is
+        // stopped first because (on the real backends) it holds a timer bound
+        // to _ioc; only then is the io_context torn down, which destroys the
+        // pending accept coroutines and releases the bound TCP/UDP sockets.
+        if (recording_started) {
+            _audio_manager->stop();
+        }
+        if (_net_thread.joinable()) {
+            _ioc->stop();
+            join_or_detach_self(_net_thread);
+        }
+        _playing_peer_list.clear();
+        _udp_server.reset();
+        _ioc.reset();
+        spdlog::error("start_server failed, rolled back to stopped state");
+        throw;
     }
-
-    {
-        ip::udp::endpoint endpoint { ip::make_address(host), port };
-        _udp_server = std::make_unique<udp_socket>(*_ioc, endpoint.protocol());
-        _udp_server->bind(endpoint);
-        asio::co_spawn(*_ioc, accept_udp_loop(), asio::detached);
-
-        // start udp success
-        spdlog::info("udp listen success on {}", endpoint);
-    }
-
-    _net_thread = std::thread([self = shared_from_this()] {
-        self->_ioc->run();
-    });
 
     spdlog::info("server started");
 }
 
 void network_manager::stop_server()
 {
+    // Idempotent and safe to call even if the server never fully started or is
+    // already stopped: every step below is guarded.
+
+    // Stop the producer (recording) first so it stops feeding the network,
+    // while _ioc is still alive for any timer it holds.
+    _audio_manager->stop();
+
     if (_ioc) {
         _ioc->stop();
     }
-    _net_thread.join();
-    _audio_manager->stop();
+    join_or_detach_self(_net_thread);
     _playing_peer_list.clear();
-    _udp_server = nullptr;
-    _ioc = nullptr;
+    _udp_server.reset();
+    _ioc.reset();
     spdlog::info("server stopped");
 }
 
 void network_manager::wait_server()
 {
-    _net_thread.join();
+    join_or_detach_self(_net_thread);
 }
 
 bool network_manager::is_running() const
@@ -415,7 +485,7 @@ void network_manager::broadcast_audio_data(const char* data, size_t count, int b
         begin_pos += real_seg_size;
     }
 
-    _ioc->post([seg_list = std::move(seg_list), self = shared_from_this()] {
+    asio::post(*_ioc, [seg_list = std::move(seg_list), self = shared_from_this()] {
         for (const auto& seg : seg_list) {
             for (auto& [peer, info] : self->_playing_peer_list) {
                 self->_udp_server->async_send_to(asio::buffer(*seg), info->udp_peer, [seg](const asio::error_code& ec, std::size_t bytes_transferred) { });
