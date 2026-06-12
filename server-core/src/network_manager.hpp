@@ -79,8 +79,11 @@ private:
 
 public:
     void broadcast_audio_data(const char* data, size_t count, int block_align);
-    
+
     std::shared_ptr<asio::io_context> _ioc;
+
+    // Allow regression tests to access private members and types
+    friend struct network_manager_test_access;
 
 private:
     std::shared_ptr<audio_manager> _audio_manager;

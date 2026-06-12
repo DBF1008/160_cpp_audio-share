@@ -60,3 +60,9 @@ if(${PLATFORM_NAME} STREQUAL "linux")
 endif()
 
 install(TARGETS server-cmd)
+
+option(BUILD_TESTS "Build regression tests" OFF)
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

@@ -17,12 +17,23 @@
 #ifndef BASIC_AUDIO_MANAGER_HPP
 #define BASIC_AUDIO_MANAGER_HPP
 
+#ifndef AUDIO_SHARE_TEST_BUILD
 #ifdef linux
 #include "linux/audio_manager_impl.hpp"
 #endif
 
 #ifdef _WINDOWS
 #include "win32/audio_manager_impl.hpp"
+#endif
+#else
+// Minimal stub for test builds — avoids pulling in platform audio headers
+namespace detail {
+class audio_manager_impl {
+protected:
+    audio_manager_impl() = default;
+    ~audio_manager_impl() = default;
+};
+}
 #endif
 
 #include <memory>

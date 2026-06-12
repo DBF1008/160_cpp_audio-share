@@ -287,7 +287,8 @@ asio::awaitable<void> network_manager::heartbeat_loop(std::shared_ptr<tcp_socket
             break;
         }
         if (std::chrono::steady_clock::now() - it->second->last_tick > _heartbeat_timeout) {
-            spdlog::info("{} timeout", it->first->remote_endpoint());
+            std::error_code ep_ec;
+            spdlog::info("{} timeout", it->first->remote_endpoint(ep_ec));
             close_session(peer);
             break;
         }
@@ -342,9 +343,15 @@ asio::awaitable<void> network_manager::accept_udp_loop()
 
 auto network_manager::close_session(std::shared_ptr<tcp_socket>& peer) -> playing_peer_list_t::iterator
 {
-    spdlog::info("close {}", peer->remote_endpoint());
+    std::error_code ec;
+    auto ep = peer->remote_endpoint(ec);
+    if (ec) {
+        spdlog::info("close (endpoint unavailable)");
+    } else {
+        spdlog::info("close {}", ep);
+    }
     auto it = remove_playing_peer(peer);
-    peer->shutdown(ip::tcp::socket::shutdown_both);
+    peer->shutdown(ip::tcp::socket::shutdown_both, ec);
     peer->close();
     return it;
 }
@@ -356,12 +363,34 @@ int network_manager::add_playing_peer(std::shared_ptr<tcp_socket>& peer)
         return 0;
     }
 
+    // Clean up stale sessions from the same TCP remote IP.
+    // When a mobile client reconnects (e.g. after a network switch), it creates
+    // a new TCP connection with a new socket, but the old session may still linger
+    // in the peer list until heartbeat timeout. Without this cleanup, audio would
+    // be broadcast to the old UDP endpoint, causing stream drift.
+    std::error_code ec;
+    auto new_addr = peer->remote_endpoint(ec).address();
+    if (!ec) {
+        auto it = _playing_peer_list.begin();
+        while (it != _playing_peer_list.end()) {
+            auto old_addr = it->first->remote_endpoint(ec).address();
+            if (!ec && old_addr == new_addr) {
+                spdlog::info("{} stale session from same IP, closing tcp://{}",
+                             __func__, it->first->remote_endpoint(ec));
+                auto sock = it->first;
+                it = close_session(sock);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     auto info = _playing_peer_list[peer] = std::make_shared<peer_info_t>();
     static int g_id = 0;
     info->id = ++g_id;
     info->last_tick = std::chrono::steady_clock::now();
 
-    spdlog::trace("{} add id:{} tcp://{}", __func__, info->id, peer->remote_endpoint());
+    spdlog::trace("{} add id:{} tcp://{}", __func__, info->id, peer->remote_endpoint(ec));
     return info->id;
 }
 
@@ -369,12 +398,14 @@ auto network_manager::remove_playing_peer(std::shared_ptr<tcp_socket>& peer) -> 
 {
     auto it = _playing_peer_list.find(peer);
     if (it == _playing_peer_list.end()) {
-        spdlog::error("{} repeat remove tcp://{}", __func__, peer->remote_endpoint());
+        std::error_code ec;
+        spdlog::error("{} repeat remove tcp://{}", __func__, peer->remote_endpoint(ec));
         return it;
     }
 
     it = _playing_peer_list.erase(it);
-    spdlog::trace("{} remove tcp://{}", __func__, peer->remote_endpoint());
+    std::error_code ec;
+    spdlog::trace("{} remove tcp://{}", __func__, peer->remote_endpoint(ec));
     return it;
 }
 
@@ -390,7 +421,8 @@ void network_manager::fill_udp_peer(int id, asio::ip::udp::endpoint udp_peer)
     }
 
     it->second->udp_peer = udp_peer;
-    spdlog::info("{} fill udp peer id:{} tcp://{} udp://{}", __func__, id, it->first->remote_endpoint(), udp_peer);
+    std::error_code ec;
+    spdlog::info("{} fill udp peer id:{} tcp://{} udp://{}", __func__, id, it->first->remote_endpoint(ec), udp_peer);
 }
 
 void network_manager::broadcast_audio_data(const char* data, size_t count, int block_align)
@@ -418,6 +450,11 @@ void network_manager::broadcast_audio_data(const char* data, size_t count, int b
     _ioc->post([seg_list = std::move(seg_list), self = shared_from_this()] {
         for (const auto& seg : seg_list) {
             for (auto& [peer, info] : self->_playing_peer_list) {
+                // Skip peers whose UDP endpoint has not been registered yet.
+                // A default-constructed udp::endpoint has unspecified address and port 0.
+                if (info->udp_peer.address().is_unspecified() && info->udp_peer.port() == 0) {
+                    continue;
+                }
                 self->_udp_server->async_send_to(asio::buffer(*seg), info->udp_peer, [seg](const asio::error_code& ec, std::size_t bytes_transferred) { });
             }
         }
