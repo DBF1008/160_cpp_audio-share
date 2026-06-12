@@ -21,6 +21,8 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <optional>
+#include <utility>
 
 #include "pre_asio.hpp"
 #include <asio.hpp>
@@ -30,6 +32,10 @@
 
 class network_manager : public std::enable_shared_from_this<network_manager>
 {
+    // Grants the regression tests access to the session / UDP-registration
+    // internals exercised by the bug fix. See test/network_manager_test.cpp.
+    friend struct nm_test;
+
     using default_token = asio::as_tuple_t<asio::use_awaitable_t<>>;
     using tcp_acceptor = default_token::as_default_on_t<asio::ip::tcp::acceptor>;
     using tcp_socket = default_token::as_default_on_t<asio::ip::tcp::socket>;
@@ -38,7 +44,9 @@ class network_manager : public std::enable_shared_from_this<network_manager>
 
     struct peer_info_t {
         int id = 0;
-        asio::ip::udp::endpoint udp_peer;
+        // Empty until the client registers its UDP endpoint over UDP. While empty
+        // the peer is in the TCP->UDP handshake window and must not receive audio.
+        std::optional<asio::ip::udp::endpoint> udp_peer;
         std::chrono::steady_clock::time_point last_tick;
     };
 
@@ -76,6 +84,21 @@ private:
     int add_playing_peer(std::shared_ptr<tcp_socket>& peer);
     playing_peer_list_t::iterator remove_playing_peer(std::shared_ptr<tcp_socket>& peer);
     void fill_udp_peer(int id, asio::ip::udp::endpoint udp_peer);
+
+    // Whether a peer has a usable, registered UDP endpoint (i.e. it has finished
+    // the TCP->UDP handshake and is not pointing at an unspecified address).
+    static bool is_udp_registered(const peer_info_t& info);
+    // Snapshot of the endpoints of every peer that is a valid send target.
+    std::vector<asio::ip::udp::endpoint> collect_udp_targets() const;
+    // Close every playing session, other than `keep`, that is registered to the
+    // same host address. Used to drop the stale session left behind by a network
+    // switch / fast reconnect so audio only flows to the current endpoint.
+    void evict_stale_peers(const std::shared_ptr<tcp_socket>& keep, const asio::ip::address& address);
+    // Pure decision used by evict_stale_peers: given (id, registered endpoint)
+    // pairs, return the ids that are stale for a new registration from `address`.
+    static std::vector<int> select_stale_ids(
+        const std::vector<std::pair<int, std::optional<asio::ip::udp::endpoint>>>& peers,
+        int keep_id, const asio::ip::address& address);
 
 public:
     void broadcast_audio_data(const char* data, size_t count, int block_align);

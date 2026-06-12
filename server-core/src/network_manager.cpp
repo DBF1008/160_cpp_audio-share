@@ -21,6 +21,10 @@
 #include <list>
 #include <ranges>
 #include <coroutine>
+#include <algorithm>
+#include <optional>
+#include <vector>
+#include <utility>
 
 #ifdef _WINDOWS
 #include <iphlpapi.h>
@@ -342,10 +346,17 @@ asio::awaitable<void> network_manager::accept_udp_loop()
 
 auto network_manager::close_session(std::shared_ptr<tcp_socket>& peer) -> playing_peer_list_t::iterator
 {
-    spdlog::info("close {}", peer->remote_endpoint());
+    // May be called more than once for the same socket (e.g. evict_stale_peers
+    // closes it, then its own read_loop unwinds and closes it again), so every
+    // step must tolerate an already-closed socket and never throw.
+    std::error_code ec;
+    auto remote = peer->remote_endpoint(ec);
+    if (!ec) {
+        spdlog::info("close {}", remote);
+    }
     auto it = remove_playing_peer(peer);
-    peer->shutdown(ip::tcp::socket::shutdown_both);
-    peer->close();
+    peer->shutdown(ip::tcp::socket::shutdown_both, ec);
+    peer->close(ec);
     return it;
 }
 
@@ -369,12 +380,14 @@ auto network_manager::remove_playing_peer(std::shared_ptr<tcp_socket>& peer) -> 
 {
     auto it = _playing_peer_list.find(peer);
     if (it == _playing_peer_list.end()) {
-        spdlog::error("{} repeat remove tcp://{}", __func__, peer->remote_endpoint());
+        // Expected during eviction / disconnect races (close_session may run
+        // twice for one socket), so this is not an error.
+        spdlog::debug("{} tcp peer already removed", __func__);
         return it;
     }
 
     it = _playing_peer_list.erase(it);
-    spdlog::trace("{} remove tcp://{}", __func__, peer->remote_endpoint());
+    spdlog::trace("{} remove tcp peer", __func__);
     return it;
 }
 
@@ -389,8 +402,103 @@ void network_manager::fill_udp_peer(int id, asio::ip::udp::endpoint udp_peer)
         return;
     }
 
-    it->second->udp_peer = udp_peer;
-    spdlog::info("{} fill udp peer id:{} tcp://{} udp://{}", __func__, id, it->first->remote_endpoint(), udp_peer);
+    auto tcp_peer = it->first;  // keep the key alive across eviction
+    auto info = it->second;
+
+    // The UDP registration must originate from the same host as the TCP control
+    // connection. After a network switch / fast reconnect a stale datagram from
+    // an old session can race in; honoring it would point the stream at a wrong
+    // or dead endpoint, so reject any source-address mismatch.
+    std::error_code ec;
+    auto tcp_remote = tcp_peer->remote_endpoint(ec);
+    if (ec) {
+        spdlog::warn("{} tcp peer already closed id:{} udp://{}", __func__, id, udp_peer);
+        return;
+    }
+    if (udp_peer.address() != tcp_remote.address()) {
+        spdlog::warn("{} reject udp registration with mismatched source id:{} tcp://{} udp://{}", __func__, id, tcp_remote, udp_peer);
+        return;
+    }
+
+    // A fresh registration from this host supersedes any earlier playing session
+    // from the same host (the old TCP session is left half-open on a network
+    // switch / fast reconnect). Drop the stale ones first so audio flows only to
+    // the current endpoint instead of drifting to the old one.
+    evict_stale_peers(tcp_peer, udp_peer.address());
+
+    info->udp_peer = udp_peer;
+    spdlog::info("{} fill udp peer id:{} tcp://{} udp://{}", __func__, id, tcp_remote, udp_peer);
+}
+
+bool network_manager::is_udp_registered(const peer_info_t& info)
+{
+    if (!info.udp_peer.has_value()) {
+        return false;
+    }
+    // Guard against a never-registered / zeroed endpoint slipping through: a real
+    // client never sits on the unspecified address or port 0.
+    const auto& endpoint = *info.udp_peer;
+    return !endpoint.address().is_unspecified() && endpoint.port() != 0;
+}
+
+std::vector<asio::ip::udp::endpoint> network_manager::collect_udp_targets() const
+{
+    std::vector<asio::ip::udp::endpoint> targets;
+    targets.reserve(_playing_peer_list.size());
+    for (const auto& [peer, info] : _playing_peer_list) {
+        if (is_udp_registered(*info)) {
+            targets.push_back(*info->udp_peer);
+        }
+    }
+    return targets;
+}
+
+std::vector<int> network_manager::select_stale_ids(
+    const std::vector<std::pair<int, std::optional<asio::ip::udp::endpoint>>>& peers,
+    int keep_id, const asio::ip::address& address)
+{
+    std::vector<int> stale;
+    for (const auto& [id, udp_peer] : peers) {
+        if (id == keep_id) {
+            continue;
+        }
+        if (udp_peer && udp_peer->address() == address) {
+            stale.push_back(id);
+        }
+    }
+    return stale;
+}
+
+void network_manager::evict_stale_peers(const std::shared_ptr<tcp_socket>& keep, const asio::ip::address& address)
+{
+    int keep_id = 0;
+    if (auto keep_it = _playing_peer_list.find(keep); keep_it != _playing_peer_list.end()) {
+        keep_id = keep_it->second->id;
+    }
+
+    std::vector<std::pair<int, std::optional<asio::ip::udp::endpoint>>> view;
+    view.reserve(_playing_peer_list.size());
+    for (const auto& [peer, info] : _playing_peer_list) {
+        view.emplace_back(info->id, info->udp_peer);
+    }
+
+    const auto stale_ids = select_stale_ids(view, keep_id, address);
+    if (stale_ids.empty()) {
+        return;
+    }
+
+    // Collect the sockets first; closing them mutates _playing_peer_list.
+    std::vector<std::shared_ptr<tcp_socket>> stale_sockets;
+    for (const auto& [peer, info] : _playing_peer_list) {
+        if (std::find(stale_ids.begin(), stale_ids.end(), info->id) != stale_ids.end()) {
+            stale_sockets.push_back(peer);
+        }
+    }
+
+    for (auto& peer : stale_sockets) {
+        spdlog::info("{} evict stale session from {} superseded by new registration", __func__, address.to_string());
+        close_session(peer);
+    }
 }
 
 void network_manager::broadcast_audio_data(const char* data, size_t count, int block_align)
@@ -416,9 +524,18 @@ void network_manager::broadcast_audio_data(const char* data, size_t count, int b
     }
 
     _ioc->post([seg_list = std::move(seg_list), self = shared_from_this()] {
+        // Only send to peers that have completed UDP registration. A peer still
+        // in the TCP->UDP handshake window (or whose stale session was just
+        // evicted) has no valid endpoint, and must not be sent audio — otherwise
+        // it is fired at 0.0.0.0:0 and lost, which is why first playback was
+        // silent and reconnects drifted to old endpoints.
+        const auto targets = self->collect_udp_targets();
+        if (targets.empty()) {
+            return;
+        }
         for (const auto& seg : seg_list) {
-            for (auto& [peer, info] : self->_playing_peer_list) {
-                self->_udp_server->async_send_to(asio::buffer(*seg), info->udp_peer, [seg](const asio::error_code& ec, std::size_t bytes_transferred) { });
+            for (const auto& target : targets) {
+                self->_udp_server->async_send_to(asio::buffer(*seg), target, [seg](const asio::error_code& ec, std::size_t bytes_transferred) { });
             }
         }
     });

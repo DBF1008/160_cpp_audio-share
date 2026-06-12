@@ -10,6 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(AUDIO_SHARE_STATIC_LIBCPP "Link statically with standard C++ library (Only for Linux)" ON)
+option(AUDIO_SHARE_BUILD_TESTS "Build server-core regression tests" ON)
 
 set(AUDIO_SHARE_BIN_NAME "as-cmd")
 configure_file(src/config.h.in config.h)
@@ -27,36 +28,41 @@ endif()
 message(STATUS "PLATFORM_NAME ${PLATFORM_NAME}")
 
 find_package(Protobuf CONFIG REQUIRED)
-include_directories(${CMAKE_CURRENT_BINARY_DIR})
 protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ../protos/client.proto)
 
-include_directories("src")
-set(
-	lib_src_list
+find_package(asio CONFIG REQUIRED)
+find_package(spdlog CONFIG REQUIRED)
+find_package(cxxopts CONFIG REQUIRED)
+
+# Core library shared by the CLI server (server-cmd), the MFC server and the
+# regression tests, so all of them exercise the same network/session code.
+add_library(as-core STATIC
 	"src/network_manager.cpp"
 	"src/audio_manager.cpp"
 	"src/${PLATFORM_NAME}/audio_manager_impl.cpp"
 	${PROTO_SRCS}
 )
-
-add_executable(server-cmd
-	${lib_src_list}
-	"src/main.cpp"
-)
-set_target_properties(server-cmd PROPERTIES OUTPUT_NAME ${AUDIO_SHARE_BIN_NAME})
-if(AUDIO_SHARE_STATIC_LIBCPP AND UNIX)
-	target_link_options(server-cmd PRIVATE "-static-libstdc++")
-endif()
-
-find_package(asio CONFIG REQUIRED)
-find_package(spdlog CONFIG REQUIRED)
-find_package(cxxopts CONFIG REQUIRED)
-target_link_libraries(server-cmd PRIVATE asio::asio spdlog::spdlog protobuf::libprotobuf cxxopts::cxxopts)
+target_include_directories(as-core PUBLIC "src" ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(as-core PUBLIC asio::asio spdlog::spdlog protobuf::libprotobuf)
 
 if(${PLATFORM_NAME} STREQUAL "linux")
 	find_package(PkgConfig REQUIRED)
 	pkg_check_modules(pipewire REQUIRED IMPORTED_TARGET libpipewire-0.3)
-	target_link_libraries(server-cmd PRIVATE PkgConfig::pipewire)
+	target_link_libraries(as-core PUBLIC PkgConfig::pipewire)
+endif()
+
+add_executable(server-cmd "src/main.cpp")
+set_target_properties(server-cmd PROPERTIES OUTPUT_NAME ${AUDIO_SHARE_BIN_NAME})
+target_link_libraries(server-cmd PRIVATE as-core cxxopts::cxxopts)
+if(AUDIO_SHARE_STATIC_LIBCPP AND UNIX)
+	target_link_options(server-cmd PRIVATE "-static-libstdc++")
 endif()
 
 install(TARGETS server-cmd)
+
+if(AUDIO_SHARE_BUILD_TESTS)
+	enable_testing()
+	add_executable(as-test "test/network_manager_test.cpp")
+	target_link_libraries(as-test PRIVATE as-core)
+	add_test(NAME network_manager_test COMMAND as-test)
+endif()
