@@ -88,4 +88,56 @@ namespace unittest
             Assert::IsFalse(util::is_newer_version("v12.17.0", "v12.17.0"));
         }
     };
+
+    TEST_CLASS(test_evaluate_update)
+    {
+    public:
+        // A newer published release than the running version -> notify.
+        TEST_METHOD(evaluate_update_newer) {
+            auto r = util::evaluate_update(
+                R"({"tag_name":"v1.2.0","html_url":"https://example.com/releases/v1.2.0"})",
+                "v1.0.0");
+            Assert::IsTrue(r.update_available);
+            Assert::IsTrue(std::string("v1.2.0") == r.tag_name);
+            Assert::IsTrue(std::string("https://example.com/releases/v1.2.0") == r.html_url);
+        }
+
+        // Same version -> no update.
+        TEST_METHOD(evaluate_update_same) {
+            auto r = util::evaluate_update(
+                R"({"tag_name":"v1.0.0","html_url":"https://example.com/releases/v1.0.0"})",
+                "v1.0.0");
+            Assert::IsFalse(r.update_available);
+        }
+
+        // Published release older than the running version -> no update.
+        TEST_METHOD(evaluate_update_older) {
+            auto r = util::evaluate_update(
+                R"({"tag_name":"v0.9.0","html_url":"https://example.com/releases/v0.9.0"})",
+                "v1.0.0");
+            Assert::IsFalse(r.update_available);
+        }
+
+        // Malformed response -> throws (worker treats this as an error).
+        TEST_METHOD(evaluate_update_malformed_json) {
+            try {
+                util::evaluate_update("this is not json", "v1.0.0");
+            }
+            catch (const std::exception&) {
+                return;
+            }
+            Assert::Fail();
+        }
+
+        // Missing "tag_name" field -> throws.
+        TEST_METHOD(evaluate_update_missing_tag_name) {
+            try {
+                util::evaluate_update(R"({"html_url":"https://example.com"})", "v1.0.0");
+            }
+            catch (const std::exception&) {
+                return;
+            }
+            Assert::Fail();
+        }
+    };
 }

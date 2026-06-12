@@ -134,6 +134,7 @@ BEGIN_MESSAGE_MAP(CMainDialog, CDialogEx)
     ON_WM_PAINT()
     ON_WM_QUERYDRAGICON()
     ON_MESSAGE(WM_APP_NOTIFYICON, &CMainDialog::OnNotifyIcon)
+    ON_MESSAGE(WM_APP_CHECK_UPDATE_RESULT, &CMainDialog::OnCheckUpdateResult)
     ON_WM_DESTROY()
     ON_WM_CTLCOLOR()
     ON_NOTIFY(TCN_SELCHANGE, IDC_TAB, &CMainDialog::OnTcnSelchangeTab)
@@ -263,6 +264,34 @@ LRESULT CMainDialog::OnNotifyIcon(WPARAM wParam, LPARAM lParam)
     }
     else if (event == NIN_BALLOONUSERCLICK) {
         ShellExecuteW(nullptr, nullptr, m_strUpdateLink, nullptr, nullptr, 0);
+    }
+
+    return 0;
+}
+
+// Runs on the UI thread (posted by the update-check worker). All update-related
+// UI lives here so the worker thread never touches the window directly; if the
+// window was destroyed meanwhile, PostMessage simply never delivers this.
+LRESULT CMainDialog::OnCheckUpdateResult(WPARAM wParam, LPARAM lParam)
+{
+    std::unique_ptr<UpdateCheckMessage> msg(reinterpret_cast<UpdateCheckMessage*>(lParam));
+    if (!msg) {
+        return 0;
+    }
+
+    if (msg->ok) {
+        if (msg->update_available) {
+            SetUpdateLink(msg->update_link.c_str());
+            CString s;
+            (void)s.LoadStringW(IDS_NEW_VERSION);
+            ShowBalloonNotification(s, msg->tag_name.c_str());
+        }
+        else if (msg->prompt) {
+            AfxMessageBox(IDS_NO_UPDATE, MB_OK | MB_ICONINFORMATION);
+        }
+    }
+    else if (msg->prompt) {
+        AfxMessageBox(msg->error_text.c_str(), MB_OK | MB_ICONSTOP);
     }
 
     return 0;

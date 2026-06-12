@@ -67,6 +67,7 @@ protected:
 	afx_msg void OnClose();
 	afx_msg void OnSysCommand(UINT nID, LPARAM lParam);
 	afx_msg LRESULT OnNotifyIcon(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnCheckUpdateResult(WPARAM wParam, LPARAM lParam);
 	afx_msg void OnDestroy();
 	afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
 	afx_msg void OnTcnSelchangeTab(NMHDR* pNMHDR, LRESULT* pResult);

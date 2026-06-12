@@ -1,8 +1,23 @@
 #include "util.hpp"
 #include <algorithm>
 #include <ranges>
+#include <nlohmann/json.hpp>
 
 namespace util {
+
+    update_check_result evaluate_update(const std::string& latest_release_json,
+                                        const std::string& current_version)
+    {
+        auto res = nlohmann::json::parse(latest_release_json);
+
+        update_check_result result;
+        result.tag_name = res.at("tag_name").get<std::string>();
+        result.update_available = is_newer_version(result.tag_name, current_version);
+        if (result.update_available) {
+            result.html_url = res.at("html_url").get<std::string>();
+        }
+        return result;
+    }
 
     bool is_newer_version(const std::string& lhs, const std::string& rhs)
     {

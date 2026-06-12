@@ -2,6 +2,10 @@
 
 #include "CTabPanel.h"
 
+#include <atomic>
+#include <memory>
+#include <thread>
+
 // CAppSettingsTabPanel dialog
 
 class CAppSettingsTabPanel : public CTabPanel
@@ -31,6 +35,7 @@ public:
 	afx_msg void OnBnClickedWhenCloseButton(UINT nID);
 	afx_msg void OnBnClickedButtonUpdate();
 	void CheckForUpdate(bool bPromptError);
+	afx_msg void OnDestroy();
 
 public:
 	LPCWSTR m_lpszSection;
@@ -51,4 +56,12 @@ public:
 	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	CComboBox m_comboLanguage;
 	afx_msg void OnCbnSelchangeComboLanguage();
+
+	// Background update-check worker. It is cancelled and joined in OnDestroy so
+	// it can never touch a destroyed window or keep running into process teardown.
+	std::jthread m_updateThread;
+	// true while a check is running, so the auto-update timer and the manual
+	// button don't launch overlapping checks. Held via shared_ptr so the worker
+	// can clear it without holding a reference to this (possibly destroyed) panel.
+	std::shared_ptr<std::atomic<bool>> m_pUpdating = std::make_shared<std::atomic<bool>>(false);
 };

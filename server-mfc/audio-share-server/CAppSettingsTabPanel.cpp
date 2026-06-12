@@ -19,9 +19,7 @@
 #include <wil/win32_result_macros.h>
 #include <spdlog/spdlog.h>
 #include <filesystem>
-#include <nlohmann/json.hpp>
-
-using json = nlohmann::json;
+#include <stop_token>
 
 constexpr int check_update_interval = 3 * 60 * 60 * 1000;
 
@@ -64,6 +62,7 @@ BEGIN_MESSAGE_MAP(CAppSettingsTabPanel, CTabPanel)
     ON_COMMAND_RANGE(IDC_RADIO_EXIT, IDC_RADIO_MINIMIZE, CAppSettingsTabPanel::OnBnClickedWhenCloseButton)
     ON_BN_CLICKED(IDC_BUTTON_UPDATE, &CAppSettingsTabPanel::OnBnClickedButtonUpdate)
     ON_WM_TIMER()
+    ON_WM_DESTROY()
     ON_CBN_SELCHANGE(IDC_COMBO_LANGUAGE, &CAppSettingsTabPanel::OnCbnSelchangeComboLanguage)
 END_MESSAGE_MAP()
 
@@ -261,67 +260,114 @@ void CAppSettingsTabPanel::OnBnClickedButtonUpdate()
 
 void CAppSettingsTabPanel::CheckForUpdate(bool bPromptError)
 {
-    std::thread([=] {
-        try
-        {
-            CInternetSession session(
-                L"Audio Share Server",
-                INTERNET_NO_CALLBACK,
-                INTERNET_OPEN_TYPE_DIRECT,
-                0, 0,
-                INTERNET_FLAG_DONT_CACHE
-            );
-            auto httpFile = (CHttpFile*)session.OpenURL(
-                L"https://api.github.com/repos/mkckr0/audio-share/releases/latest",
-                INTERNET_NO_CALLBACK,
-                INTERNET_FLAG_TRANSFER_BINARY | INTERNET_FLAG_RELOAD
-            );
-            if (!httpFile) {
-                return;
-            }
-            auto cleanup = wil::scope_exit([&] {
-                httpFile->Close();
-            });
+    // Runs on the UI thread. Serialize so the auto-update timer and the manual
+    // "Check Update" button can't launch overlapping checks (and duplicate balloons).
+    if (m_pUpdating->exchange(true)) {
+        return;
+    }
 
-            std::string response;
-            char buf[1024];
-            while (int len = httpFile->Read(buf, sizeof(buf))) {
-                response.append(buf, len);
-            }
+    // Resolve everything the worker needs here, on the UI thread, so the worker
+    // never reads an MFC window object that may be destroyed while it runs.
+    HWND hMainWnd = nullptr;
+    if (auto* pMainDialog = theApp.GetMainDialog()) {
+        hMainWnd = pMainDialog->GetSafeHwnd();
+    }
+    if (!hMainWnd) {
+        m_pUpdating->store(false);
+        return;
+    }
 
-            auto res = json::parse(response);
-            std::string version("v");
-            version += CW2A(CAboutDialog::GetStringFileInfo(L"ProductVersion"));
-            std::string tag_name = res["tag_name"];
-            if (util::is_newer_version(tag_name, version)) {
-                auto pMainDialog = theApp.GetMainDialog();
-                pMainDialog->SetUpdateLink(CA2W(std::string(res["html_url"]).c_str()));
-                CString s;
-                (void)s.LoadStringW(IDS_NEW_VERSION);
-                pMainDialog->ShowBalloonNotification(s, CA2W(tag_name.c_str()));
-            }
-            else {
-                if (bPromptError) {
-                    AfxMessageBox(IDS_NO_UPDATE, MB_OK | MB_ICONINFORMATION);
+    std::string currentVersion("v");
+    currentVersion += CW2A(CAboutDialog::GetStringFileInfo(L"ProductVersion"));
+
+    auto pUpdating = m_pUpdating;
+
+    m_updateThread = std::jthread(
+        [hMainWnd, currentVersion = std::move(currentVersion), bPromptError, pUpdating](std::stop_token stopToken) {
+            // Always release the "checking" guard, however we leave the thread.
+            auto clearGuard = wil::scope_exit([&] { pUpdating->store(false); });
+
+            auto msg = std::make_unique<UpdateCheckMessage>();
+            msg->prompt = bPromptError;
+
+            try {
+                CInternetSession session(
+                    L"Audio Share Server",
+                    INTERNET_NO_CALLBACK,
+                    INTERNET_OPEN_TYPE_DIRECT,
+                    0, 0,
+                    INTERNET_FLAG_DONT_CACHE
+                );
+
+                // Finite timeouts so an unreachable/stalled network can't keep this
+                // worker (and the join in OnDestroy) alive for long.
+                DWORD timeout = 5 * 1000;
+                session.SetOption(INTERNET_OPTION_CONNECT_TIMEOUT, timeout);
+                session.SetOption(INTERNET_OPTION_SEND_TIMEOUT, timeout);
+                session.SetOption(INTERNET_OPTION_RECEIVE_TIMEOUT, timeout);
+
+                if (stopToken.stop_requested()) {
+                    return;
+                }
+
+                CHttpFile* httpFile = (CHttpFile*)session.OpenURL(
+                    L"https://api.github.com/repos/mkckr0/audio-share/releases/latest",
+                    INTERNET_NO_CALLBACK,
+                    INTERNET_FLAG_TRANSFER_BINARY | INTERNET_FLAG_RELOAD
+                );
+                if (!httpFile) {
+                    return;
+                }
+                auto closeFile = wil::scope_exit([&] {
+                    httpFile->Close();
+                    delete httpFile;   // OpenURL returns a heap object the caller owns
+                });
+
+                std::string response;
+                char buf[1024];
+                int len = 0;
+                while (!stopToken.stop_requested() && (len = httpFile->Read(buf, sizeof(buf))) > 0) {
+                    response.append(buf, len);
+                }
+                if (stopToken.stop_requested()) {
+                    return;
+                }
+
+                auto result = util::evaluate_update(response, currentVersion);
+                msg->ok = true;
+                msg->update_available = result.update_available;
+                if (result.update_available) {
+                    msg->update_link = CA2W(result.html_url.c_str());
+                    msg->tag_name = CA2W(result.tag_name.c_str());
                 }
             }
-        }
-        catch (const std::exception& e) {
-            spdlog::error("CAppSettingsTabPanel::OnBnClickedButtonUpdate: {}", e.what());
-            if (bPromptError) {
-                AfxMessageBox(CA2W(e.what()), MB_OK | MB_ICONSTOP);
+            catch (const std::exception& e) {
+                spdlog::error("CAppSettingsTabPanel::CheckForUpdate: {}", e.what());
+                msg->ok = false;
+                msg->error_text = CA2W(e.what());
             }
-        }
-        catch (CException* e) {
-            WCHAR lpszError[512];
-            UINT nHelpContext;
-            e->GetErrorMessage(lpszError, _countof(lpszError), &nHelpContext);
-            spdlog::error(L"CAppSettingsTabPanel::OnBnClickedButtonUpdate: {}", lpszError);
-            if (bPromptError) {
-                AfxMessageBox(lpszError, MB_OK | MB_ICONSTOP);
+            catch (CException* e) {
+                WCHAR lpszError[512];
+                UINT nHelpContext;
+                e->GetErrorMessage(lpszError, _countof(lpszError), &nHelpContext);
+                e->Delete();   // MFC requires CException* to be released
+                spdlog::error(L"CAppSettingsTabPanel::CheckForUpdate: {}", lpszError);
+                msg->ok = false;
+                msg->error_text = lpszError;
             }
-        }
-    }).detach();
+
+            // Don't post results into a window that is being torn down.
+            if (stopToken.stop_requested()) {
+                return;
+            }
+
+            // Marshal the result to the UI thread. PostMessage to a destroyed
+            // window fails harmlessly; in that case we own and free the payload.
+            UpdateCheckMessage* raw = msg.release();
+            if (!::PostMessageW(hMainWnd, WM_APP_CHECK_UPDATE_RESULT, 0, reinterpret_cast<LPARAM>(raw))) {
+                delete raw;
+            }
+        });
 }
 
 void CAppSettingsTabPanel::OnTimer(UINT_PTR nIDEvent)
@@ -334,6 +380,18 @@ void CAppSettingsTabPanel::OnTimer(UINT_PTR nIDEvent)
     CTabPanel::OnTimer(nIDEvent);
 }
 
+void CAppSettingsTabPanel::OnDestroy()
+{
+    // Stop further timer-triggered checks, then make sure any in-flight check
+    // finishes before this window/process goes away so it can't touch dead UI.
+    KillTimer(TIMER_ID_CHECK_UPDATE);
+    if (m_updateThread.joinable()) {
+        m_updateThread.request_stop();
+        m_updateThread.join();
+    }
+
+    CTabPanel::OnDestroy();
+}
 
 void CAppSettingsTabPanel::OnCbnSelchangeComboLanguage()
 {
