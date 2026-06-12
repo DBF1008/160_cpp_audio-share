@@ -19,6 +19,7 @@
 #include "audio_manager.hpp"
 #include "client.pb.h"
 #include "network_manager.hpp"
+#include "linux/spa_format_mapping.hpp"
 
 #include <fstream>
 #include <functional>
@@ -30,6 +31,35 @@
 #include <spdlog/spdlog.h>
 
 using namespace io::github::mkckr0::audio_share_app::pb;
+
+namespace detail {
+
+AudioFormat_Encoding spa_format_to_encoding(uint32_t spa_format, int* bits_per_sample)
+{
+    switch (spa_format) {
+    case SPA_AUDIO_FORMAT_F32_LE:
+        *bits_per_sample = 32;
+        return AudioFormat_Encoding_ENCODING_PCM_FLOAT;
+    case SPA_AUDIO_FORMAT_S8:
+    case SPA_AUDIO_FORMAT_U8:
+        *bits_per_sample = 8;
+        return AudioFormat_Encoding_ENCODING_PCM_8BIT;
+    case SPA_AUDIO_FORMAT_S16_LE:
+        *bits_per_sample = 16;
+        return AudioFormat_Encoding_ENCODING_PCM_16BIT;
+    case SPA_AUDIO_FORMAT_S24_LE:
+        *bits_per_sample = 24;
+        return AudioFormat_Encoding_ENCODING_PCM_24BIT;
+    case SPA_AUDIO_FORMAT_S32_LE:
+        *bits_per_sample = 32;
+        return AudioFormat_Encoding_ENCODING_PCM_32BIT;
+    default:
+        *bits_per_sample = 0;
+        return AudioFormat_Encoding_ENCODING_INVALID;
+    }
+}
+
+} // namespace detail
 
 struct roundtrip {
     struct pw_core* _core;
@@ -225,65 +255,21 @@ void audio_manager::do_loopback_recording(std::shared_ptr<network_manager> netwo
 
                 spa_format_audio_raw_parse(param, &audio_info.info.raw);
                 spdlog::info("audio_info.info.raw.format: {}", (int)audio_info.info.raw.format);
-    
-                switch (audio_info.info.raw.format)
-                {
-                case SPA_AUDIO_FORMAT_F32_LE:
-                    user_data->format->set_encoding(AudioFormat_Encoding_ENCODING_PCM_FLOAT);
-                    break;
-                case SPA_AUDIO_FORMAT_S8:
-                    user_data->format->set_encoding(AudioFormat_Encoding_ENCODING_PCM_8BIT);
-                    break;
-                case SPA_AUDIO_FORMAT_S16_LE:
-                    user_data->format->set_encoding(AudioFormat_Encoding_ENCODING_PCM_16BIT);
-                    break;
-                case SPA_AUDIO_FORMAT_S24_LE:
-                    user_data->format->set_encoding(AudioFormat_Encoding_ENCODING_PCM_24BIT);
-                    break;
-                case SPA_AUDIO_FORMAT_S32_LE:
-                    user_data->format->set_encoding(AudioFormat_Encoding_ENCODING_PCM_32BIT);
-                    break;
-                default:
+
+                int bits_per_sample = 0;
+                auto encoding = detail::spa_format_to_encoding(audio_info.info.raw.format, &bits_per_sample);
+                if (encoding == AudioFormat_Encoding_ENCODING_INVALID) {
+                    spdlog::error("unsupported capture format: spa_format={}", (int)audio_info.info.raw.format);
                     user_data->format->set_encoding(AudioFormat_Encoding_ENCODING_INVALID);
-                    spdlog::info("the capture format is not supported");
-                    exit(EXIT_FAILURE);
+                    user_data->block_align = 0;
+                    pw_main_loop_quit(user_data->loop);
+                    return;
                 }
+
+                user_data->format->set_encoding(encoding);
                 spdlog::info("the capture format is supported");
                 user_data->format->set_channels((int)audio_info.info.raw.channels);
                 user_data->format->set_sample_rate((int)audio_info.info.raw.rate);
-                int bits_per_sample = 0;
-                switch (audio_info.info.raw.format)
-                {
-                case SPA_AUDIO_FORMAT_S8:
-                case SPA_AUDIO_FORMAT_U8:
-                    bits_per_sample = 8;
-                    break;
-                case SPA_AUDIO_FORMAT_S16_LE:
-                case SPA_AUDIO_FORMAT_S16_BE:
-                case SPA_AUDIO_FORMAT_U16_LE:
-                case SPA_AUDIO_FORMAT_U16_BE:
-                    bits_per_sample = 16;
-                    break;
-                case SPA_AUDIO_FORMAT_S24_LE:
-                case SPA_AUDIO_FORMAT_S24_BE:
-                case SPA_AUDIO_FORMAT_U24_LE:
-                case SPA_AUDIO_FORMAT_U24_BE:
-                    bits_per_sample = 24;
-                    break;
-                case SPA_AUDIO_FORMAT_S32_LE:
-                case SPA_AUDIO_FORMAT_S32_BE:
-                case SPA_AUDIO_FORMAT_U32_LE:
-                case SPA_AUDIO_FORMAT_U32_BE:
-                case SPA_AUDIO_FORMAT_F32_LE:
-                case SPA_AUDIO_FORMAT_F32_BE:
-                case SPA_AUDIO_FORMAT_F32P:
-                    bits_per_sample = 32;
-                    break;
-                default:
-                    bits_per_sample = 0;
-                    break;
-                }
-    
                 user_data->block_align = bits_per_sample / 8 * user_data->format->channels();
                 spdlog::info("block_align: {}", user_data->block_align);
                 spdlog::info("AudioFormat:\n{}", user_data->format->DebugString());
@@ -293,22 +279,34 @@ void audio_manager::do_loopback_recording(std::shared_ptr<network_manager> netwo
             auto* user_data = (struct user_data_t*)data;
             struct pw_buffer *b;
             struct spa_buffer *buf;
-    
+
             if ((b = pw_stream_dequeue_buffer(user_data->stream)) == nullptr) {
                 pw_log_warn("out of buffers: %m");
                 return;
             }
-    
+
             buf = b->buffer;
             if (buf->datas[0].data == nullptr) {
+                pw_log_warn("buffer has null data");
+                pw_stream_queue_buffer(user_data->stream, b);
+                return;
+            }
+
+            if (buf->datas[0].chunk == nullptr) {
+                pw_log_warn("buffer has null chunk");
+                pw_stream_queue_buffer(user_data->stream, b);
+                return;
+            }
+
+            auto count = buf->datas[0].chunk->size;
+            if (count == 0 || user_data->block_align == 0) {
+                pw_stream_queue_buffer(user_data->stream, b);
                 return;
             }
 
             auto begin = (const char*)buf->datas[0].data + buf->datas[0].chunk->offset;
-            auto count = buf->datas[0].chunk->size;
-
             user_data->network_manager->broadcast_audio_data(begin, count, user_data->block_align);
-    
+
             pw_stream_queue_buffer(user_data->stream, b);
         },
     };

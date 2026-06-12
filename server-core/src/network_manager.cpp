@@ -395,7 +395,7 @@ void network_manager::fill_udp_peer(int id, asio::ip::udp::endpoint udp_peer)
 
 void network_manager::broadcast_audio_data(const char* data, size_t count, int block_align)
 {
-    if (count <= 0) {
+    if (data == nullptr || count == 0 || block_align <= 0) {
         return;
     }
     // spdlog::trace("broadcast_audio_data count: {}", count);

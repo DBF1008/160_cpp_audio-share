@@ -60,3 +60,40 @@ if(${PLATFORM_NAME} STREQUAL "linux")
 endif()
 
 install(TARGETS server-cmd)
+
+# --- Regression Tests ---
+option(BUILD_TESTS "Build regression tests" OFF)
+if(BUILD_TESTS)
+    enable_testing()
+    find_package(GTest CONFIG REQUIRED)
+
+    set(test_src_list
+        "tests/test_audio_pipeline.cpp"
+    )
+    if(${PLATFORM_NAME} STREQUAL "linux")
+        list(APPEND test_src_list
+            "src/linux/audio_manager_impl.cpp"
+        )
+    endif()
+
+    add_executable(audio-pipeline-tests ${test_src_list})
+    set_target_properties(audio-pipeline-tests PROPERTIES OUTPUT_NAME "audio-pipeline-tests")
+
+    target_include_directories(audio-pipeline-tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_BINARY_DIR}
+    )
+
+    target_link_libraries(audio-pipeline-tests PRIVATE
+        GTest::gtest_main
+        protobuf::libprotobuf
+        spdlog::spdlog
+    )
+
+    if(${PLATFORM_NAME} STREQUAL "linux")
+        target_link_libraries(audio-pipeline-tests PRIVATE PkgConfig::pipewire)
+    endif()
+
+    include(GoogleTest)
+    gtest_discover_tests(audio-pipeline-tests)
+endif()
