@@ -53,6 +53,9 @@
     <ClInclude Include="..\..\server-core\src\formatter.hpp">
       <Filter>core</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\server-core\src\ip_util.hpp">
+      <Filter>core</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\server-core\src\network_manager.hpp">
       <Filter>core</Filter>
     </ClInclude>
@@ -98,6 +101,9 @@
       <Filter>core</Filter>
     </ClCompile>
     <ClCompile Include="..\..\server-core\src\network_manager.cpp">
+      <Filter>core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\server-core\src\ip_util.cpp">
       <Filter>core</Filter>
     </ClCompile>
     <ClCompile Include="..\..\server-core\src\win32\audio_manager_impl.cpp">

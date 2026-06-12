@@ -17,6 +17,7 @@
 #include "network_manager.hpp"
 #include "formatter.hpp"
 #include "audio_manager.hpp"
+#include "ip_util.hpp"
 
 #include <list>
 #include <ranges>
@@ -109,40 +110,7 @@ std::vector<std::string> network_manager::get_address_list()
 
 std::string network_manager::get_default_address()
 {
-    return select_default_address(get_address_list());
-}
-
-std::string network_manager::select_default_address(const std::vector<std::string>& address_list)
-{
-    if (address_list.empty()) {
-        return {};
-    }
-
-    auto is_private_address = [](const std::string& address) {
-        constexpr uint32_t private_addr_list[] = {
-            0x0a000000,
-            0xac100000,
-            0xc0a80000,
-        };
-
-        uint32_t addr;
-        inet_pton(AF_INET, address.c_str(), &addr);
-        addr = ntohl(addr);
-        for (auto&& private_addr : private_addr_list) {
-            if ((addr & private_addr) == private_addr) {
-                return true;
-            }
-        }
-
-        return false;
-    };
-
-    for (auto&& address : address_list) {
-        if (is_private_address(address)) {
-            return address;
-        }
-    }
-    return address_list.front();
+    return ip_util::select_default_address(get_address_list());
 }
 
 void network_manager::start_server(const std::string& host, uint16_t port, const audio_manager::capture_config& capture_config)

@@ -57,10 +57,7 @@ public:
 
     static std::vector<std::string> get_address_list();
     static std::string get_default_address();
-private:
-    static std::string select_default_address(const std::vector<std::string>& address_list);
 
-public:
     void start_server(const std::string& host, uint16_t port, const audio_manager::capture_config& capture_config);
     void stop_server();
     void wait_server();

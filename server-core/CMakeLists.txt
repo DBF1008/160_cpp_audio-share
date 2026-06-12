@@ -34,6 +34,7 @@ include_directories("src")
 set(
 	lib_src_list
 	"src/network_manager.cpp"
+	"src/ip_util.cpp"
 	"src/audio_manager.cpp"
 	"src/${PLATFORM_NAME}/audio_manager_impl.cpp"
 	${PROTO_SRCS}
@@ -60,3 +61,17 @@ if(${PLATFORM_NAME} STREQUAL "linux")
 endif()
 
 install(TARGETS server-cmd)
+
+# Regression tests for the pure address-selection logic (ip_util). This target
+# only depends on the standard library, so it builds and runs anywhere without
+# asio/protobuf/pipewire. Run with `ctest` after building.
+option(AUDIO_SHARE_BUILD_TESTS "Build server-core tests" ON)
+if(AUDIO_SHARE_BUILD_TESTS)
+	enable_testing()
+	add_executable(test_ip_util
+		"tests/test_ip_util.cpp"
+		"src/ip_util.cpp"
+	)
+	target_include_directories(test_ip_util PRIVATE "src")
+	add_test(NAME test_ip_util COMMAND test_ip_util)
+endif()
