@@ -43,6 +43,12 @@ jobs:
           cmakeListsTxtPath: ${{ github.workspace }}/server-core/CMakeLists.txt
           configurePreset: ${{ matrix.cmake_preset }}
           buildPreset: ${{ matrix.cmake_preset }}
+
+      - name: Build and run regression tests
+        run: |
+          cmake --preset linux-Test
+          cmake --build --preset linux-Test
+          ctest --test-dir out/build/linux-Test --output-on-failure
       
       - name: Pack
         run: bash pack.sh ${{ matrix.platform }}

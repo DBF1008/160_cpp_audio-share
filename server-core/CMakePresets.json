@@ -64,6 +64,14 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
+        },
+        {
+            "name": "linux-Test",
+            "inherits": "linux-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "AUDIO_SHARE_BUILD_TESTS": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -88,6 +96,10 @@
             "targets": [
                 "install/strip"
             ]
+        },
+        {
+            "name": "linux-Test",
+            "configurePreset": "linux-Test"
         }
     ]
 }

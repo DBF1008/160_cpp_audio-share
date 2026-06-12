@@ -59,4 +59,19 @@ if(${PLATFORM_NAME} STREQUAL "linux")
 	target_link_libraries(server-cmd PRIVATE PkgConfig::pipewire)
 endif()
 
+option(AUDIO_SHARE_BUILD_TESTS "Build server-core tests" OFF)
+
+# Linux-only regression tests for the PipeWire capture format/buffer logic. The helpers under
+# test are header-only and daemon-free, so this links the pipewire headers (via the imported
+# target) and protobuf, but needs no running PipeWire instance to run.
+if(AUDIO_SHARE_BUILD_TESTS AND ${PLATFORM_NAME} STREQUAL "linux")
+	enable_testing()
+	add_executable(test-audio-format
+		"tests/test_audio_format_mapping.cpp"
+		${PROTO_SRCS}
+	)
+	target_link_libraries(test-audio-format PRIVATE protobuf::libprotobuf PkgConfig::pipewire)
+	add_test(NAME audio-format-mapping COMMAND test-audio-format)
+endif()
+
 install(TARGETS server-cmd)
