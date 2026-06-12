@@ -209,8 +209,16 @@ void CAudioShareServerApp::EnsureSingleton()
             while (true) {
                 int cmd{};
                 DWORD bytesRead{};
-                (void)ReadFile(hMailSlot.get(), &cmd, sizeof(cmd), &bytesRead, nullptr);
-                this->GetMainDialog()->SendMessageW(WM_COMMAND, ID_APP_SHOW);
+                if (!ReadFile(hMailSlot.get(), &cmd, sizeof(cmd), &bytesRead, nullptr)) {
+                    break;
+                }
+                auto* pDlg = this->GetMainDialog();
+                if (pDlg) {
+                    HWND hWnd = pDlg->GetSafeHwnd();
+                    if (::IsWindow(hWnd)) {
+                        ::PostMessageW(hWnd, WM_COMMAND, ID_APP_SHOW, 0);
+                    }
+                }
                 TRACE(traceAppMsg, 0, "read loop");
             }
         }

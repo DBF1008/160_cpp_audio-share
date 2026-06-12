@@ -37,6 +37,7 @@ CAppSettingsTabPanel::CAppSettingsTabPanel(CWnd* pParent)
     , m_nWhenClose(0)
     , m_bAutoUpdate(FALSE)
 {
+    m_hShutdownEvent.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
 }
 
 CAppSettingsTabPanel::~CAppSettingsTabPanel()
@@ -65,6 +66,7 @@ BEGIN_MESSAGE_MAP(CAppSettingsTabPanel, CTabPanel)
     ON_BN_CLICKED(IDC_BUTTON_UPDATE, &CAppSettingsTabPanel::OnBnClickedButtonUpdate)
     ON_WM_TIMER()
     ON_CBN_SELCHANGE(IDC_COMBO_LANGUAGE, &CAppSettingsTabPanel::OnCbnSelchangeComboLanguage)
+    ON_MESSAGE(WM_APP_UPDATE_RESULT, &CAppSettingsTabPanel::OnUpdateResult)
 END_MESSAGE_MAP()
 
 
@@ -261,7 +263,22 @@ void CAppSettingsTabPanel::OnBnClickedButtonUpdate()
 
 void CAppSettingsTabPanel::CheckForUpdate(bool bPromptError)
 {
-    std::thread([=] {
+    // Atomic guard: only allow one update check at a time
+    bool expected = false;
+    if (!m_bUpdateInProgress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return; // Another check is already in progress
+    }
+
+    // Capture raw HWNDs instead of CWnd* — PostMessageW to a destroyed HWND safely returns FALSE
+    HWND hPanelWnd = this->GetSafeHwnd();
+    auto& shuttingDown = m_bShuttingDown;
+    auto& updateInProgress = m_bUpdateInProgress;
+
+    std::thread([=, &shuttingDown, &updateInProgress] {
+        auto clearFlag = wil::scope_exit([&] {
+            updateInProgress.store(false, std::memory_order_release);
+        });
+
         try
         {
             CInternetSession session(
@@ -285,8 +302,13 @@ void CAppSettingsTabPanel::CheckForUpdate(bool bPromptError)
 
             std::string response;
             char buf[1024];
-            while (int len = httpFile->Read(buf, sizeof(buf))) {
+            while (!shuttingDown.load(std::memory_order_acquire)) {
+                int len = httpFile->Read(buf, sizeof(buf));
+                if (len == 0) break;
                 response.append(buf, len);
+            }
+            if (shuttingDown.load(std::memory_order_acquire)) {
+                return;
             }
 
             auto res = json::parse(response);
@@ -294,32 +316,55 @@ void CAppSettingsTabPanel::CheckForUpdate(bool bPromptError)
             version += CW2A(CAboutDialog::GetStringFileInfo(L"ProductVersion"));
             std::string tag_name = res["tag_name"];
             if (util::is_newer_version(tag_name, version)) {
-                auto pMainDialog = theApp.GetMainDialog();
-                pMainDialog->SetUpdateLink(CA2W(std::string(res["html_url"]).c_str()));
+                auto* pData = new UpdateResultData{};
+                pData->code = UpdateResultCode::NewVersion;
+                pData->bPromptUser = bPromptError;
                 CString s;
                 (void)s.LoadStringW(IDS_NEW_VERSION);
-                pMainDialog->ShowBalloonNotification(s, CA2W(tag_name.c_str()));
+                wcscpy_s(pData->szTitle, s.GetString());
+                CA2W wTag(tag_name.c_str());
+                wcscpy_s(pData->szInfo, (LPCWSTR)wTag);
+                std::string html_url = res["html_url"];
+                CA2W wUrl(html_url.c_str());
+                wcscpy_s(pData->szUrl, (LPCWSTR)wUrl);
+                ::PostMessageW(hPanelWnd, WM_APP_UPDATE_RESULT, 0, (LPARAM)pData);
             }
             else {
                 if (bPromptError) {
-                    AfxMessageBox(IDS_NO_UPDATE, MB_OK | MB_ICONINFORMATION);
+                    auto* pData = new UpdateResultData{};
+                    pData->code = UpdateResultCode::NoUpdate;
+                    pData->bPromptUser = true;
+                    CString s;
+                    (void)s.LoadStringW(IDS_NO_UPDATE);
+                    wcscpy_s(pData->szTitle, s.GetString());
+                    ::PostMessageW(hPanelWnd, WM_APP_UPDATE_RESULT, 0, (LPARAM)pData);
                 }
             }
         }
         catch (const std::exception& e) {
-            spdlog::error("CAppSettingsTabPanel::OnBnClickedButtonUpdate: {}", e.what());
-            if (bPromptError) {
-                AfxMessageBox(CA2W(e.what()), MB_OK | MB_ICONSTOP);
+            spdlog::error("CAppSettingsTabPanel::CheckForUpdate: {}", e.what());
+            if (bPromptError && !shuttingDown.load(std::memory_order_acquire)) {
+                auto* pData = new UpdateResultData{};
+                pData->code = UpdateResultCode::NetworkError;
+                pData->bPromptUser = true;
+                CA2W wMsg(e.what());
+                wcscpy_s(pData->szTitle, (LPCWSTR)wMsg);
+                ::PostMessageW(hPanelWnd, WM_APP_UPDATE_RESULT, 0, (LPARAM)pData);
             }
         }
         catch (CException* e) {
             WCHAR lpszError[512];
             UINT nHelpContext;
             e->GetErrorMessage(lpszError, _countof(lpszError), &nHelpContext);
-            spdlog::error(L"CAppSettingsTabPanel::OnBnClickedButtonUpdate: {}", lpszError);
-            if (bPromptError) {
-                AfxMessageBox(lpszError, MB_OK | MB_ICONSTOP);
+            spdlog::error(L"CAppSettingsTabPanel::CheckForUpdate: {}", lpszError);
+            if (bPromptError && !shuttingDown.load(std::memory_order_acquire)) {
+                auto* pData = new UpdateResultData{};
+                pData->code = UpdateResultCode::NetworkError;
+                pData->bPromptUser = true;
+                wcscpy_s(pData->szTitle, lpszError);
+                ::PostMessageW(hPanelWnd, WM_APP_UPDATE_RESULT, 0, (LPARAM)pData);
             }
+            e->Delete();
         }
     }).detach();
 }
@@ -332,6 +377,47 @@ void CAppSettingsTabPanel::OnTimer(UINT_PTR nIDEvent)
     }
 
     CTabPanel::OnTimer(nIDEvent);
+}
+
+LRESULT CAppSettingsTabPanel::OnUpdateResult(WPARAM wParam, LPARAM lParam)
+{
+    auto* pData = reinterpret_cast<UpdateResultData*>(lParam);
+    if (!pData) return 0;
+    auto cleanup = wil::scope_exit([pData] { delete pData; });
+
+    // Safety check: ensure this panel window is still alive
+    if (!::IsWindow(this->GetSafeHwnd())) return 0;
+
+    switch (pData->code) {
+    case UpdateResultCode::NewVersion: {
+        auto pMainDialog = theApp.GetMainDialog();
+        if (pMainDialog && ::IsWindow(pMainDialog->GetSafeHwnd())) {
+            pMainDialog->SetUpdateLink(pData->szUrl);
+            pMainDialog->ShowBalloonNotification(pData->szTitle, pData->szInfo);
+        }
+        break;
+    }
+    case UpdateResultCode::NoUpdate:
+        if (pData->bPromptUser) {
+            AfxMessageBox(IDS_NO_UPDATE, MB_OK | MB_ICONINFORMATION);
+        }
+        break;
+    case UpdateResultCode::NetworkError:
+        if (pData->bPromptUser) {
+            AfxMessageBox(pData->szTitle, MB_OK | MB_ICONSTOP);
+        }
+        break;
+    }
+    return 0;
+}
+
+void CAppSettingsTabPanel::CancelPendingOperations()
+{
+    m_bShuttingDown.store(true, std::memory_order_release);
+    if (m_hShutdownEvent.is_valid()) {
+        SetEvent(m_hShutdownEvent.get());
+    }
+    KillTimer(TIMER_ID_CHECK_UPDATE);
 }
 
 

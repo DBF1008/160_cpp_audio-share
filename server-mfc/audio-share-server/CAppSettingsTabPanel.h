@@ -2,6 +2,9 @@
 
 #include "CTabPanel.h"
 
+#include <atomic>
+#include <wil/resource.h>
+
 // CAppSettingsTabPanel dialog
 
 class CAppSettingsTabPanel : public CTabPanel
@@ -31,6 +34,7 @@ public:
 	afx_msg void OnBnClickedWhenCloseButton(UINT nID);
 	afx_msg void OnBnClickedButtonUpdate();
 	void CheckForUpdate(bool bPromptError);
+	void CancelPendingOperations();
 
 public:
 	LPCWSTR m_lpszSection;
@@ -51,4 +55,10 @@ public:
 	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	CComboBox m_comboLanguage;
 	afx_msg void OnCbnSelchangeComboLanguage();
+	afx_msg LRESULT OnUpdateResult(WPARAM wParam, LPARAM lParam);
+
+	// Thread-safe update check
+	std::atomic<bool> m_bShuttingDown{false};
+	std::atomic<bool> m_bUpdateInProgress{false};
+	wil::unique_handle m_hShutdownEvent;
 };

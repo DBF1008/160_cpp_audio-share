@@ -270,6 +270,17 @@ LRESULT CMainDialog::OnNotifyIcon(WPARAM wParam, LPARAM lParam)
 
 void CMainDialog::OnDestroy()
 {
+    // Signal all child panels to cancel pending background operations BEFORE
+    // the base class OnDestroy destroys child windows
+    for (auto* panel : m_vecTabPanel) {
+        if (panel && ::IsWindow(panel->GetSafeHwnd())) {
+            auto* settingsPanel = dynamic_cast<CAppSettingsTabPanel*>(panel);
+            if (settingsPanel) {
+                settingsPanel->CancelPendingOperations();
+            }
+        }
+    }
+
     CDialogEx::OnDestroy();
 
     // TODO: Add your message handler code here
