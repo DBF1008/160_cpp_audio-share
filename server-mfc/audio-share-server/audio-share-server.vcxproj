@@ -273,6 +273,7 @@
     <ClInclude Include="CAppSettingsTabPanel.h" />
     <ClInclude Include="CMainDialog.h" />
     <ClInclude Include="client.pb.h" />
+    <ClInclude Include="config_selection.hpp" />
     <ClInclude Include="CServerTabPanel.h" />
     <ClInclude Include="CTabPanel.h" />
     <ClInclude Include="framework.h" />

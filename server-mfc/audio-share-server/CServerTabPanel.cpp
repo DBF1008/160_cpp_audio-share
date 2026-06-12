@@ -3,6 +3,7 @@
 
 #include "pch.h"
 #include "CServerTabPanel.h"
+#include "config_selection.hpp"
 #include "resource.h"
 #include "audio_manager.hpp"
 #include "network_manager.hpp"
@@ -61,12 +62,13 @@ BOOL CServerTabPanel::OnInitDialog()
     // TODO:  Add extra initialization here
     m_editPort.SetLimitText(5);
 
-    // init controls data
-    this->OnBnClickedButtonReset();
-
-    // create network_manager
+    // Create the managers before populating the controls: OnBnClickedButtonReset()
+    // enumerates audio endpoints through m_audio_manager, so it must exist first.
     m_audio_manager = std::make_shared<audio_manager>();
     m_network_manager = std::make_shared<network_manager>(m_audio_manager);
+
+    // init controls data
+    this->OnBnClickedButtonReset();
 
     auto nWhenAppStart = theApp.GetProfileIntW(L"App Settings", L"WhenAppStart", 0);
     if (nWhenAppStart == 1 || nWhenAppStart == 2 && theApp.GetProfileIntW(L"App", L"Running", false)) {
@@ -107,27 +109,33 @@ void CServerTabPanel::OnBnClickedButtonReset()
         }
         m_comboBoxAudioEndpoint.ResetContent();
 
+        // keys aligned 1:1 with the combo items, used to restore the saved selection
+        std::vector<std::wstring> endpoint_keys;
+
         auto nDefaultIndex = m_comboBoxAudioEndpoint.AddString(defaultString);
         m_comboBoxAudioEndpoint.SetItemDataPtr(nDefaultIndex, _wcsdup(L"default"));
+        endpoint_keys.push_back(L"default");
         
-        audio_manager::endpoint_list_t endpoint_list = m_audio_manager->get_endpoint_list();
-        for (auto&& [id, name] : endpoint_list) {
-            int nIndex = m_comboBoxAudioEndpoint.AddString(mbs_to_wchars(name).c_str());
-            m_comboBoxAudioEndpoint.SetItemDataPtr(nIndex, _wcsdup(mbs_to_wchars(id).c_str()));
-        }
-
-        auto configEndpoint = theApp.GetProfileStringW(L"Capture", L"endpoint", L"default");
-        for (int nIndex = 0; nIndex < m_comboBoxAudioEndpoint.GetCount(); ++nIndex) {
-            if (configEndpoint == (LPCWSTR)m_comboBoxAudioEndpoint.GetItemDataPtr(nIndex)) {
-                m_comboBoxAudioEndpoint.SetCurSel(nIndex);
-                break;
+        // m_audio_manager is created before this runs; guard anyway so a missing
+        // audio subsystem degrades to "only default" instead of crashing.
+        if (m_audio_manager) {
+            audio_manager::endpoint_list_t endpoint_list = m_audio_manager->get_endpoint_list();
+            for (auto&& [id, name] : endpoint_list) {
+                int nIndex = m_comboBoxAudioEndpoint.AddString(mbs_to_wchars(name).c_str());
+                std::wstring endpoint_id = mbs_to_wchars(id);
+                m_comboBoxAudioEndpoint.SetItemDataPtr(nIndex, _wcsdup(endpoint_id.c_str()));
+                endpoint_keys.push_back(endpoint_id);
             }
         }
-        if (m_comboBoxAudioEndpoint.GetCurSel() == CB_ERR) {
-            // selected endpoint is not in list, no selected
-            theApp.WriteProfileStringW(L"Capture", L"endpoint", L"default");
-            m_comboBoxAudioEndpoint.SetCurSel(nDefaultIndex);
-        }
+
+        // Restore the saved endpoint. If it is gone (unplugged, list changed,
+        // first run) fall back to the default item. Resolving the selection must
+        // not write to the registry: the saved endpoint id is kept so the choice
+        // returns when the device comes back, and the encoding setting is left
+        // completely untouched.
+        auto configEndpoint = theApp.GetProfileStringW(L"Capture", L"endpoint", L"default");
+        int nSel = config_selection::resolve_selected_index<std::wstring>(endpoint_keys, configEndpoint.GetString());
+        m_comboBoxAudioEndpoint.SetCurSel(nSel);
     }
 
     // encoding list
@@ -142,23 +150,20 @@ void CServerTabPanel::OnBnClickedButtonReset()
             { encoding_t::encoding_s24, L"24 bit integer PCM" },
             { encoding_t::encoding_s32, L"32 bit integer PCM" },
         };
+        std::vector<int> encoding_keys;
         for (auto&& [encoding, name] : array) {
             auto nIndex = m_comboEncoding.AddString(name.c_str());
             m_comboEncoding.SetItemData(nIndex, (int)encoding);
+            encoding_keys.push_back((int)encoding);
         }
         
-        // select
-        auto configEncoding = (encoding_t)theApp.GetProfileIntW(L"Capture", L"encoding", (int)encoding_t::encoding_default);
-        for (int nIndex = 0; nIndex < m_comboEncoding.GetCount(); ++nIndex) {
-            if (configEncoding == (encoding_t)m_comboEncoding.GetItemData(nIndex)) {
-                m_comboEncoding.SetCurSel(nIndex);
-                break;
-            }
-        }
-        if (m_comboEncoding.GetCurSel() == CB_ERR) {
-            theApp.WriteProfileInt(L"Capture", L"endpoint", (int)encoding_t::encoding_default);
-            m_comboEncoding.SetCurSel(0);
-        }
+        // Restore the saved encoding, falling back to the default item when the
+        // stored value is unknown. Like the endpoint above this performs no
+        // registry write, so it can never clobber the saved endpoint -- the
+        // original defect wrote the encoding fallback into the "endpoint" key.
+        auto configEncoding = theApp.GetProfileIntW(L"Capture", L"encoding", (int)encoding_t::encoding_default);
+        int nSel = config_selection::resolve_selected_index<int>(encoding_keys, (int)configEncoding);
+        m_comboEncoding.SetCurSel(nSel);
     }
 }
 
